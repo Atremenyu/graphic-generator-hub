@@ -1,4 +1,5 @@
 import { pipeline, env } from '@huggingface/transformers';
+import { generateImage } from './geminiApi'; // Import the mock API
 
 // Configure transformers.js
 env.allowLocalModels = false;
@@ -93,207 +94,56 @@ class AIAdService {
     };
   }
 
+  private imageToBase64(image: HTMLImageElement): string {
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(image, 0, 0);
+    return canvas.toDataURL("image/jpeg");
+  }
+
+  private createPrompt(analysis: AdAnalysis, format: AdFormat, imageAsBase64: string): string {
+    const detectedObjects = analysis.objects.map(obj => obj.label).join(', ');
+    const prompt = `
+      Recrea una imagen de anuncio para el formato ${format.name} (${format.width}x${format.height}).
+      El anuncio original tiene un estilo ${analysis.style}.
+      Debe incluir los siguientes elementos: ${detectedObjects}.
+      La paleta de colores principal es: ${analysis.colors.join(', ')}.
+      ${analysis.text.length > 0 ? `Incluye el siguiente texto: "${analysis.text.join(' ')}"` : ''}
+      Aquí está la imagen original como referencia en base64 (no la copies exactamente, úsala como inspiración):
+      ${imageAsBase64.substring(0, 100)}...
+    `;
+    return prompt.trim();
+  }
+
   async generateAdFormats(
     originalImage: HTMLImageElement,
     analysis: AdAnalysis,
     onProgress?: (format: string, progress: number) => void
   ): Promise<{ [key: string]: Blob }> {
     const results: { [key: string]: Blob } = {};
+    const imageAsBase64 = this.imageToBase64(originalImage);
 
-    for (const format of AD_FORMATS) {
+    const generationPromises = AD_FORMATS.map(async (format) => {
       onProgress?.(format.name, 0);
       
-      console.log(`Generando formato ${format.name} (${format.width}×${format.height})...`);
+      console.log(`Generando formato ${format.name} (${format.width}×${format.height}) con IA...`);
       
-      const adaptedImage = await this.adaptImageToFormat(
-        originalImage,
-        format,
-        analysis
-      );
+      const prompt = this.createPrompt(analysis, format, imageAsBase64);
+
+      const generatedBlob = await generateImage(prompt, {
+        width: format.width,
+        height: format.height,
+      });
       
-      results[`format${format.width}x${format.height}`] = adaptedImage;
+      results[`format${format.width}x${format.height}`] = generatedBlob;
       onProgress?.(format.name, 100);
-    }
+    });
+
+    await Promise.all(generationPromises);
 
     return results;
-  }
-
-  private async adaptImageToFormat(
-    originalImage: HTMLImageElement,
-    format: AdFormat,
-    analysis: AdAnalysis
-  ): Promise<Blob> {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d')!;
-    
-    canvas.width = format.width;
-    canvas.height = format.height;
-
-    // Fill background with dominant color
-    const bgColor = analysis.colors[0] || '#ffffff';
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Calculate optimal image placement and scaling
-    const { scale, x, y, width, height } = this.calculateImagePlacement(
-      originalImage,
-      format,
-      analysis
-    );
-
-    // Draw adapted image
-    ctx.save();
-    
-    // Apply smart cropping and scaling
-    if (format.ratio === '8.09:1') {
-      // For leaderboard (very wide), focus on horizontal elements
-      this.drawLeaderboardStyle(ctx, originalImage, analysis, format);
-    } else if (format.ratio === '1.20:1') {
-      // For square-ish format, center main elements
-      this.drawSquareStyle(ctx, originalImage, analysis, format);
-    } else {
-      // For rectangular format, balance elements
-      this.drawRectangularStyle(ctx, originalImage, analysis, format);
-    }
-    
-    ctx.restore();
-
-    // Add text overlay if needed (simplified)
-    this.addTextOverlay(ctx, analysis, format);
-
-    return new Promise(resolve => {
-      canvas.toBlob(blob => resolve(blob!), 'image/png', 1.0);
-    });
-  }
-
-  private drawLeaderboardStyle(
-    ctx: CanvasRenderingContext2D,
-    image: HTMLImageElement,
-    analysis: AdAnalysis,
-    format: AdFormat
-  ) {
-    // For leaderboard, create a horizontal composition
-    const aspectRatio = image.width / image.height;
-    
-    if (aspectRatio > 4) {
-      // Image is already wide, fit it
-      const scale = Math.min(format.width / image.width, format.height / image.height);
-      const scaledWidth = image.width * scale;
-      const scaledHeight = image.height * scale;
-      const x = (format.width - scaledWidth) / 2;
-      const y = (format.height - scaledHeight) / 2;
-      
-      ctx.drawImage(image, x, y, scaledWidth, scaledHeight);
-    } else {
-      // Image is tall, crop and center horizontally
-      const cropHeight = image.width / (format.width / format.height);
-      const cropY = Math.max(0, (image.height - cropHeight) / 2);
-      
-      ctx.drawImage(
-        image,
-        0, cropY, image.width, cropHeight,
-        0, 0, format.width, format.height
-      );
-    }
-  }
-
-  private drawSquareStyle(
-    ctx: CanvasRenderingContext2D,
-    image: HTMLImageElement,
-    analysis: AdAnalysis,
-    format: AdFormat
-  ) {
-    // For square format, center the main content
-    const scale = Math.min(format.width / image.width, format.height / image.height);
-    const scaledWidth = image.width * scale;
-    const scaledHeight = image.height * scale;
-    const x = (format.width - scaledWidth) / 2;
-    const y = (format.height - scaledHeight) / 2;
-    
-    ctx.drawImage(image, x, y, scaledWidth, scaledHeight);
-  }
-
-  private drawRectangularStyle(
-    ctx: CanvasRenderingContext2D,
-    image: HTMLImageElement,
-    analysis: AdAnalysis,
-    format: AdFormat
-  ) {
-    // For rectangular format, smart crop based on content
-    const targetRatio = format.width / format.height;
-    const imageRatio = image.width / image.height;
-    
-    if (imageRatio > targetRatio) {
-      // Image is wider, crop sides
-      const cropWidth = image.height * targetRatio;
-      const cropX = (image.width - cropWidth) / 2;
-      
-      ctx.drawImage(
-        image,
-        cropX, 0, cropWidth, image.height,
-        0, 0, format.width, format.height
-      );
-    } else {
-      // Image is taller, crop top/bottom
-      const cropHeight = image.width / targetRatio;
-      const cropY = Math.max(0, (image.height - cropHeight) / 2);
-      
-      ctx.drawImage(
-        image,
-        0, cropY, image.width, cropHeight,
-        0, 0, format.width, format.height
-      );
-    }
-  }
-
-  private calculateImagePlacement(
-    image: HTMLImageElement,
-    format: AdFormat,
-    analysis: AdAnalysis
-  ) {
-    // Smart placement based on detected objects
-    const targetRatio = format.width / format.height;
-    const imageRatio = image.width / image.height;
-    
-    let scale, x, y, width, height;
-    
-    if (imageRatio > targetRatio) {
-      // Image is wider than target
-      scale = format.height / image.height;
-      height = format.height;
-      width = image.width * scale;
-      x = (format.width - width) / 2;
-      y = 0;
-    } else {
-      // Image is taller than target
-      scale = format.width / image.width;
-      width = format.width;
-      height = image.height * scale;
-      x = 0;
-      y = (format.height - height) / 2;
-    }
-    
-    return { scale, x, y, width, height };
-  }
-
-  private addTextOverlay(
-    ctx: CanvasRenderingContext2D,
-    analysis: AdAnalysis,
-    format: AdFormat
-  ) {
-    // Add detected text if needed (simplified implementation)
-    if (analysis.text.length > 0 && format.height > 100) {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-      ctx.font = `${Math.min(format.height / 10, 24)}px Arial`;
-      ctx.textAlign = 'center';
-      
-      const text = analysis.text[0];
-      const textWidth = ctx.measureText(text).width;
-      
-      if (textWidth < format.width * 0.8) {
-        ctx.fillText(text, format.width / 2, format.height - 20);
-      }
-    }
   }
 
   private extractColors(image: HTMLImageElement): string[] {
