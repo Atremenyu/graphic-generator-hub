@@ -2,13 +2,19 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { UploadZone } from "@/components/UploadZone";
 import { ResultsSection } from "@/components/ResultsSection";
-import { Sparkles, Zap } from "lucide-react";
+import { ProgressModal } from "@/components/ProgressModal";
+import { Sparkles, Zap, Brain } from "lucide-react";
 import { toast } from "sonner";
+import { aiAdService, type AdAnalysis } from "@/lib/aiService";
 import heroBg from "@/assets/hero-bg.jpg";
 
 const Index = () => {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [currentStep, setCurrentStep] = useState("");
+  const [progress, setProgress] = useState(0);
+  const [currentFormat, setCurrentFormat] = useState("");
+  const [analysis, setAnalysis] = useState<AdAnalysis | null>(null);
   const [results, setResults] = useState<{
     format600x500?: string;
     format728x90?: string;
@@ -18,11 +24,13 @@ const Index = () => {
   const handleFileUpload = (file: File) => {
     setUploadedFile(file);
     setResults({});
+    setAnalysis(null);
   };
 
   const handleClearFile = () => {
     setUploadedFile(null);
     setResults({});
+    setAnalysis(null);
   };
 
   const generateFormats = async () => {
@@ -32,27 +40,69 @@ const Index = () => {
     }
 
     setIsProcessing(true);
-    toast.info("Generando formatos... Esto puede tomar unos momentos");
-
+    setProgress(0);
+    setCurrentStep("Inicializando IA...");
+    
     try {
-      // Simulamos la generación de imágenes - aquí se integraría con la API de Google
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      // Initialize AI service
+      await aiAdService.initialize();
+      setProgress(10);
+
+      // Load image for analysis
+      setCurrentStep("Analizando anuncio...");
+      const imageElement = await loadImageFromFile(uploadedFile);
+      setProgress(20);
+
+      // Analyze the advertisement
+      const adAnalysis = await aiAdService.analyzeAd(imageElement);
+      setAnalysis(adAnalysis);
+      setProgress(40);
+
+      toast.success(`Análisis completado: ${adAnalysis.objects.length} objetos detectados`);
+
+      // Generate formats
+      setCurrentStep("Generando formatos...");
+      const generatedFormats = await aiAdService.generateAdFormats(
+        imageElement,
+        adAnalysis,
+        (format, formatProgress) => {
+          setCurrentFormat(format);
+          setCurrentStep(`Generando ${format}...`);
+          setProgress(40 + (formatProgress / 100) * 20); // 40-60% for each format
+        }
+      );
+
+      // Convert blobs to URLs
+      const resultUrls: typeof results = {};
+      Object.entries(generatedFormats).forEach(([key, blob]) => {
+        resultUrls[key as keyof typeof results] = URL.createObjectURL(blob);
+      });
+
+      setResults(resultUrls);
+      setProgress(100);
+      setCurrentStep("¡Completado!");
       
-      // Por ahora creamos URLs de ejemplo
-      const mockResults = {
-        format600x500: URL.createObjectURL(uploadedFile),
-        format728x90: URL.createObjectURL(uploadedFile),
-        format640x200: URL.createObjectURL(uploadedFile)
-      };
-      
-      setResults(mockResults);
-      toast.success("¡Formatos generados exitosamente!");
+      toast.success("¡Formatos generados exitosamente con IA!");
     } catch (error) {
       console.error("Error generando formatos:", error);
       toast.error("Error al generar los formatos. Inténtalo de nuevo.");
     } finally {
       setIsProcessing(false);
+      setTimeout(() => {
+        setCurrentStep("");
+        setProgress(0);
+        setCurrentFormat("");
+      }, 2000);
     }
+  };
+
+  const loadImageFromFile = (file: File): Promise<HTMLImageElement> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = URL.createObjectURL(file);
+    });
   };
 
   const downloadAll = () => {
@@ -81,8 +131,8 @@ const Index = () => {
         {/* Header */}
         <header className="text-center mb-12">
           <div className="inline-flex items-center gap-2 bg-gradient-primary text-white px-4 py-2 rounded-full text-sm font-medium mb-6 shadow-soft">
-            <Sparkles className="h-4 w-4" />
-            Powered by AI
+            <Brain className="h-4 w-4" />
+            Powered by AI Vision & Object Detection
           </div>
           
           <h1 className="text-4xl md:text-6xl font-bold text-foreground mb-4 bg-gradient-hero bg-clip-text text-transparent">
@@ -90,8 +140,8 @@ const Index = () => {
           </h1>
           
           <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto leading-relaxed">
-            Convierte tu anuncio a múltiples formatos publicitarios con tecnología de IA avanzada. 
-            Sube tu imagen y obtén versiones optimizadas para diferentes plataformas.
+            Usa modelos avanzados de IA para analizar tu anuncio y recrearlo inteligentemente en múltiples formatos. 
+            Detecta objetos, extrae colores y adapta el diseño automáticamente.
           </p>
         </header>
 
@@ -158,6 +208,38 @@ const Index = () => {
           </div>
         )}
 
+        {/* Analysis Results */}
+        {analysis && (
+          <div className="max-w-4xl mx-auto mb-8 bg-card border border-border rounded-lg p-6 shadow-soft">
+            <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <Brain className="h-5 w-5 text-primary" />
+              Análisis de IA Completado
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+              <div>
+                <span className="font-medium text-foreground">Objetos detectados:</span>
+                <p className="text-muted-foreground">{analysis.objects.length} elementos</p>
+              </div>
+              <div>
+                <span className="font-medium text-foreground">Estilo identificado:</span>
+                <p className="text-muted-foreground capitalize">{analysis.style}</p>
+              </div>
+              <div>
+                <span className="font-medium text-foreground">Colores dominantes:</span>
+                <div className="flex gap-1 mt-1">
+                  {analysis.colors.slice(0, 4).map((color, i) => (
+                    <div
+                      key={i}
+                      className="w-4 h-4 rounded border border-border"
+                      style={{ backgroundColor: color }}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Results Section */}
         <ResultsSection
           results={results}
@@ -165,6 +247,14 @@ const Index = () => {
           onDownloadAll={downloadAll}
         />
       </div>
+
+      {/* Progress Modal */}
+      <ProgressModal
+        isOpen={isProcessing}
+        currentStep={currentStep}
+        progress={progress}
+        format={currentFormat}
+      />
     </div>
   );
 };
